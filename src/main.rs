@@ -169,16 +169,22 @@ fn start_temp_loop(
     let mut was_long_sleep = false;
     while !cancellation_token.load(std::sync::atomic::Ordering::Relaxed) {
         let cpu_temp = read_temp_file(&mut cpu_temp_file, &mut temp_buffer)?;
-        let temp = if let Some(gpu_temp_file) = &mut gpu_temp_file {
-            let gpu_temp = read_temp_file(gpu_temp_file, &mut temp_buffer)?;
-            if gpu_temp > cpu_temp {
-                gpu_temp
-            } else {
-                cpu_temp
+        let mut temp = cpu_temp;
+        if let Some(file) = &mut gpu_temp_file {
+            // A discrete GPU can disappear from under us: a reset, a runtime
+            // suspend or a Thunderbolt re-enumeration all invalidate the open
+            // sensor. Losing the GPU reading must not take the daemon down,
+            // because it leaves the fans pinned at whatever speed it wrote
+            // last while the machine keeps heating. Fall back to the CPU
+            // sensor and stop looking at the GPU.
+            match read_temp_file(file, &mut temp_buffer) {
+                Ok(gpu_temp) => temp = temp.max(gpu_temp),
+                Err(err) => {
+                    eprintln!("GPU temperature unreadable ({err}), using the CPU sensor alone");
+                    gpu_temp_file = None;
+                }
             }
-        } else {
-            cpu_temp
-        };
+        }
 
         temps.push_back(temp);
         if was_long_sleep {
