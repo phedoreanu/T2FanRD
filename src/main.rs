@@ -97,7 +97,10 @@ fn read_temp_file(temp_file: &mut std::fs::File, temp_buf: &mut String) -> Resul
     temp.map(|t| (t / 1000) as u8)
 }
 
-fn find_temp_file(temps: glob::Paths, temp_buf: &mut String) -> Option<std::fs::File> {
+fn find_temp_file(
+    temps: impl Iterator<Item = glob::GlobResult>,
+    temp_buf: &mut String,
+) -> Option<std::fs::File> {
     for temp_path_res in temps {
         let Ok(temp_path) = temp_path_res else {
             eprintln!("Unable to read glob path");
@@ -122,9 +125,23 @@ fn find_cpu_temp_file(temp_buf: &mut String) -> Result<std::fs::File> {
     find_temp_file(temps, temp_buf).ok_or(Error::NoCpu)
 }
 
+fn is_amdgpu_sensor(temp_path: &std::path::Path) -> bool {
+    temp_path
+        .parent()
+        .and_then(|hwmon| std::fs::read_to_string(hwmon.join("name")).ok())
+        .is_some_and(|name| name.trim() == "amdgpu")
+}
+
 fn find_gpu_temp_file(temp_buf: &mut String) -> Result<Option<std::fs::File>> {
-    let temps = glob::glob("/sys/class/drm/card0/device/hwmon/hwmon*/temp1_input")?;
-    Ok(find_temp_file(temps, temp_buf))
+    // The discrete GPU is not always card0: the number depends on probe order,
+    // and on a MacBookPro16,1 the Intel iGPU takes card1 and the AMD dGPU card2.
+    // Look at every card and prefer the amdgpu sensor over anything else.
+    let mut temps: Vec<PathBuf> =
+        glob::glob("/sys/class/drm/card*/device/hwmon/hwmon*/temp1_input")?
+            .filter_map(Result::ok)
+            .collect();
+    temps.sort_by_key(|path| !is_amdgpu_sensor(path));
+    Ok(find_temp_file(temps.into_iter().map(Ok), temp_buf))
 }
 
 fn main() -> ExitCode {
